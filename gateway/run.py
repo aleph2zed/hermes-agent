@@ -1871,6 +1871,9 @@ class GatewayRunner:
         enabled and the model supports Priority Processing / Anthropic fast
         mode, attach `request_overrides` so the API call is marked
         accordingly.
+        
+        ALSO: If provider is Bedrock, route through Bedrock quota-aware router
+        to skip exhausted models and avoid wasted API calls.
         """
         from hermes_cli.models import resolve_fast_mode_overrides
 
@@ -1883,6 +1886,30 @@ class GatewayRunner:
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
         }
+        
+        # Phase 3.1.6: Bedrock quota-aware routing
+        # If provider is Bedrock, skip exhausted models to avoid 429 spam
+        if is_bedrock_provider(runtime.get("provider")):
+            try:
+                bedrock_routing = select_bedrock_model_for_gateway(
+                    prompt=user_message,
+                    context=""  # We don't have full system context here, but prompt is enough
+                )
+                selected_model = bedrock_routing.get("model_id", model)
+                skipped = bedrock_routing.get("skipped_exhausted", [])
+                reason = bedrock_routing.get("reason", "")
+                
+                if skipped or selected_model != model:
+                    logger.info(
+                        "Bedrock routing: %s (skipped exhausted: %s)",
+                        reason,
+                        skipped or "none"
+                    )
+                    model = selected_model
+            except Exception as e:
+                logger.warning("Bedrock routing failed (using primary): %s", e)
+                # Fallthrough to use original model
+        
         route = {
             "model": model,
             "runtime": runtime,
