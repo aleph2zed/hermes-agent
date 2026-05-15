@@ -51,6 +51,7 @@ from typing import Dict, Optional, Any, List, Union
 # preserving the established test-patch surface.
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.i18n import t
+from agent.bedrock_quota_hook import select_bedrock_model_for_gateway, is_bedrock_provider
 from hermes_cli.config import cfg_get
 
 # --- Agent cache tuning ---------------------------------------------------
