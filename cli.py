@@ -2476,9 +2476,17 @@ class HermesCLI:
         # Fallback provider chain — tried in order when primary fails after retries.
         # Supports new list format (fallback_providers) and legacy single-dict (fallback_model).
         fb = CLI_CONFIG.get("fallback_providers") or CLI_CONFIG.get("fallback_model") or []
-        # Normalize legacy single-dict to a one-element list
+        # Normalize: parse JSON strings, handle dicts, ensure we have a list
+        if isinstance(fb, str):
+            try:
+                import json
+                fb = json.loads(fb)
+            except (json.JSONDecodeError, TypeError):
+                fb = []
         if isinstance(fb, dict):
             fb = [fb] if fb.get("provider") and fb.get("model") else []
+        elif not isinstance(fb, list):
+            fb = []
         self._fallback_model = fb
 
         # Signature of the currently-initialised agent's runtime.  Used to
@@ -3876,27 +3884,89 @@ class HermesCLI:
     def _resolve_turn_agent_config(self, user_message: str) -> dict:
         """Build the effective model/runtime config for a single user turn.
 
-        Always uses the session's primary model/provider.  If the user has
-        toggled `/fast` on and the current model supports Priority
-        Processing / Anthropic fast mode, attach `request_overrides` so the
-        API call is marked accordingly.
+        Uses task-based routing (if enabled) to select the optimal model for
+        the turn's complexity.  Falls back to the session's primary model when
+        routing is disabled or no better match is found.
+
+        If the user has toggled `/fast` on and the current model supports
+        Priority Processing / Anthropic fast mode, attach `request_overrides`
+        so the API call is marked accordingly.
         """
         from hermes_cli.models import resolve_fast_mode_overrides
+
+        # ── Task-based model routing ──
+        # Check if routing is enabled and if we should switch models for this turn
+        effective_provider = self.provider
+        effective_model = self.model
+        
+        routing_config = CLI_CONFIG.get("model_routing") or {}
+        routing_enabled = routing_config.get("enabled", False)
+        
+        if routing_enabled:
+            try:
+                from agent.task_router import route_turn
+                
+                # Gather context signals for the router
+                context_pct = 0.0
+                recent_tool_calls = 0
+                has_code_context = False
+                
+                if hasattr(self, "_agent") and self._agent:
+                    agent = self._agent
+                    # Context usage
+                    if hasattr(agent, "context_compressor"):
+                        cc = agent.context_compressor
+                        if hasattr(cc, "current_tokens") and hasattr(cc, "max_context_tokens"):
+                            max_ctx = cc.max_context_tokens or 1
+                            context_pct = (cc.current_tokens or 0) / max_ctx
+                    # Recent tool calls (last 5 turns)
+                    if hasattr(agent, "_recent_tool_calls"):
+                        recent_tool_calls = agent._recent_tool_calls
+                    # Code context detection
+                    if hasattr(agent, "_has_code_in_context"):
+                        has_code_context = agent._has_code_in_context
+                
+                # Get fallback chain for available models
+                fallback_chain = getattr(self, "_fallback_model", []) or []
+                
+                route_result = route_turn(
+                    prompt=user_message,
+                    primary_provider=self.provider,
+                    primary_model=self.model,
+                    fallback_chain=fallback_chain,
+                    context_pct=context_pct,
+                    recent_tool_calls=recent_tool_calls,
+                    has_code_context=has_code_context,
+                    enabled=True,
+                )
+                
+                if route_result:
+                    routed_provider, routed_model, reason = route_result
+                    effective_provider = routed_provider
+                    effective_model = routed_model
+                    logging.debug(
+                        "Task router switched: %s/%s → %s/%s (%s)",
+                        self.provider, self.model,
+                        effective_provider, effective_model,
+                        reason,
+                    )
+            except Exception as e:
+                logging.warning("Task router error, using default model: %s", e)
 
         runtime = {
             "api_key": self.api_key,
             "base_url": self.base_url,
-            "provider": self.provider,
+            "provider": effective_provider,
             "api_mode": self.api_mode,
             "command": self.acp_command,
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
         }
         route = {
-            "model": self.model,
+            "model": effective_model,
             "runtime": runtime,
             "signature": (
-                self.model,
+                effective_model,
                 runtime["provider"],
                 runtime["base_url"],
                 runtime["api_mode"],

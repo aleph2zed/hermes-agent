@@ -240,6 +240,7 @@ _PROVIDER_POLICY_BLOCKED_PATTERNS = [
 _AUTH_PATTERNS = [
     "invalid api key",
     "invalid_api_key",
+    "incorrect api key",      # xAI: "Incorrect API key provided: ..."
     "authentication",
     "unauthorized",
     "forbidden",
@@ -795,6 +796,18 @@ def _classify_400(
     if any(p in error_msg for p in _BILLING_PATTERNS):
         return result_fn(
             FailoverReason.billing,
+            retryable=False,
+            should_rotate_credential=True,
+            should_fallback=True,
+        )
+
+    # Auth failures returned as 400 by some providers (e.g. xAI returns
+    # HTTP 400 with "Incorrect API key" instead of 401).  Check auth
+    # patterns here so the primary is marked permanently failed and not
+    # retried on the next turn.
+    if any(p in error_msg for p in _AUTH_PATTERNS):
+        return result_fn(
+            FailoverReason.auth_permanent,
             retryable=False,
             should_rotate_credential=True,
             should_fallback=True,

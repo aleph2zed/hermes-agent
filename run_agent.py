@@ -8396,6 +8396,12 @@ class AIAgent:
             primary_provider = ((self._primary_runtime or {}).get("provider") or "").strip().lower()
             if (not fallback_already_active) or (primary_provider and current_provider == primary_provider):
                 self._rate_limited_until = time.monotonic() + 60
+        if reason == FailoverReason.auth_permanent:
+            # API key permanently rejected — mark primary as dead so
+            # _restore_primary_runtime never re-activates it for this session.
+            fallback_already_active = bool(getattr(self, "_fallback_activated", False))
+            if not fallback_already_active:
+                self._primary_permanently_failed = True
         if self._fallback_index >= len(self._fallback_chain):
             return False
 
@@ -8614,6 +8620,9 @@ class AIAgent:
         """
         if not self._fallback_activated:
             return False
+
+        if getattr(self, "_primary_permanently_failed", False):
+            return False  # primary has a permanent auth failure — never restore
 
         if getattr(self, "_rate_limited_until", 0) > time.monotonic():
             return False  # primary still in rate-limit cooldown, stay on fallback
@@ -13867,7 +13876,7 @@ class AIAgent:
                         # Try fallback before aborting — a different provider
                         # may not have the same issue (rate limit, auth, etc.)
                         self._emit_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
-                        if self._try_activate_fallback():
+                        if self._try_activate_fallback(reason=classified.reason):
                             retry_count = 0
                             compression_attempts = 0
                             primary_recovery_attempted = False
